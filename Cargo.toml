@@ -1,0 +1,21 @@
+[package]
+name = "imposter"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+adblock = "0.8.10"
+async-compat = "0.2.4"
+async-io = "2.3.3"
+async-std = { version = "1.12.0", features = ["attributes"] }
+base64 = "0.22.1"
+clap = { version = "4.5.4", features = ["derive"] }
+env_logger = "0.11.3"
+http = "1.1.0"
+httparse = "1.8.0"
+log = "0.4.21"
+native-tls = "0.2.12"
+socks = "0.3.4"
+tokio = { version = "1.38.0", features = ["io-util"] }
+ureq = { version = "2.9.7", default-features = false, features = ["native-tls"] }
+url = "2.5.0"
