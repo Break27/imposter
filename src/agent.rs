@@ -123,7 +123,7 @@ impl Agent {
 
         if self.check_request_blocked(&request.path) {
             log::info!("CLIENT --> PROXY --> {host}");
-            let mut outbound = self.io(self.builder.connect(&host))?;
+            let mut outbound = self.io(self.builder.connect(host))?;
 
             // forward intercepted request
             outbound.write_all(request.as_bytes()).await?;
@@ -134,7 +134,7 @@ impl Agent {
             return Ok(());
         }
 
-        let target = self.io(TcpStream::connect(host))?;
+        let mut target = self.io(TcpStream::connect(host))?;
         log::info!("CLIENT <-> TARGET (direct)");
 
         if let http::Method::CONNECT = request.method {
@@ -143,6 +143,11 @@ impl Agent {
             conn.write_all(resp).await?;
             conn.flush().await?;
             log::debug!("Received CONNECT (200 OK)");
+        } else {
+            // forward intercepted request
+            target.write_all(request.as_bytes()).await?;
+            target.flush().await?;
+            log::debug!("CLIENT --> (intercepted) --> TARGET");
         }
 
         self.tunnel(conn, target).await?;
