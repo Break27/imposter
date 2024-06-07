@@ -1,3 +1,5 @@
+use crate::error::Error;
+
 macro_rules! impl_http {
     (pub struct $name:ident($inner:ident) { $($variant:ident = $value:literal,)* }) => {
         #[derive(PartialEq)]
@@ -70,5 +72,56 @@ impl Request {
 
     pub fn host(&self) -> &str {
         &self.host
+    }
+}
+
+pub struct Response {
+    pub version: Version,
+    pub status: u16,
+    pub message: String
+}
+
+impl Response {
+    pub fn new<T>(version: Version, status: u16, message: T) -> Self
+    where
+        T: ToString
+    {
+        Self { version, status, message: message.to_string() }
+    }
+
+    pub fn make<T>(status: u16, message: T) -> Self
+    where
+        T: ToString
+    {
+        Self { version: Version::HTTP_11, status, message: message.to_string() }
+    }
+
+    pub fn from_err(err: Error) -> Self {
+        use async_std::io::ErrorKind::TimedOut;
+        match err {
+            Error::BadRequest(x) => 
+                Self::make(400, x),
+            Error::Io(e) if e.kind() == TimedOut =>
+                Self::make(408, "Timeout"),
+            Error::Io(_) =>
+                Self::make(503, "Unavailable"),
+            Error::Parse(_) =>
+                Self::make(500, "Internal Server Error"),
+            Error::Utf8(_) =>
+                Self::make(500, "Internal Server Error"),
+        }
+    }
+}
+
+impl Default for Response {
+    fn default() -> Self {
+        Self::make(200, "OK")
+    }
+}
+
+impl ToString for Response {
+    fn to_string(&self) -> String {
+        format!("{} {} {}\r\n\r\n", 
+            self.version.to_string(), self.status, self.message)
     }
 }

@@ -31,7 +31,6 @@ impl_error! {
         Io(std::io::Error),
         Parse(httparse::Error),
         Utf8(std::str::Utf8Error),
-        Timeout(async_std::future::TimeoutError),
     }
 }
 

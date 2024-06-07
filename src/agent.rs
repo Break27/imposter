@@ -112,11 +112,11 @@ unsafe impl Send for Agent {}
 unsafe impl Sync for Agent {}
 
 impl Agent {
-    pub async fn handle<S>(&self, mut conn: S) -> Result<()>
+    pub async fn handle<S>(&self, conn: &mut S) -> Result<()>
     where
         S: Read + Write + Send + Sync + Unpin + 'static
     {
-        let request = self.read(&mut conn)?;
+        let request = self.read(conn)?;
         let host = request.host();
 
         log::info!("CLIENT --> {host}");
@@ -138,9 +138,9 @@ impl Agent {
         log::info!("CLIENT <-> TARGET (direct)");
 
         if let http::Method::CONNECT = request.method {
-            let resp = b"HTTP/1.1 200 OK\r\n\r\n";
+            let resp = http::Response::default();
             // send response to client with code 200 and an EMPTY body
-            conn.write_all(resp).await?;
+            conn.write_all(resp.to_string().as_bytes()).await?;
             conn.flush().await?;
             log::debug!("Received CONNECT (200 OK)");
         } else {
@@ -154,7 +154,7 @@ impl Agent {
         return Ok(());
     }
 
-    async fn tunnel<A, B>(&self, mut inbound: A, mut outbound: B) -> Result<()>
+    async fn tunnel<A, B>(&self, inbound: &mut A, mut outbound: B) -> Result<()>
     where
         A: Read + Write + Send + Sync + Unpin + 'static,
         B: Read + Write + Send + Sync + Unpin + 'static,

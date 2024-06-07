@@ -1,5 +1,9 @@
 use std::sync::Arc;
 
+use async_std::io::WriteExt;
+
+use crate::http;
+
 
 pub struct Server {
     addrs: std::net::SocketAddr,
@@ -15,13 +19,17 @@ impl Server {
 
         loop {
             let agent = agent.clone();
-            let (inbound, addr) = listener.accept().await?;
+            let (mut inbound, addr) = listener.accept().await?;
 
             log::info!("*** Incoming connection from {}", addr);
 
             async_std::task::spawn(async move {
-                if let Err(e) = agent.handle(inbound).await {
+                if let Err(e) = agent.handle(&mut inbound).await {
                     log::error!("Agent: {}", e);
+                    let resp = http::Response::from_err(e);
+                    
+                    inbound.write(resp.to_string().as_bytes()).await.unwrap();
+                    inbound.flush().await.unwrap();
                 }
             });
         }
