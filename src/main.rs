@@ -1,5 +1,6 @@
 use clap::Parser;
 
+mod http;
 pub mod agent;
 pub mod error;
 pub mod connection;

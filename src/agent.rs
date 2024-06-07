@@ -3,6 +3,7 @@ use async_std::net::TcpStream;
 
 use crate::connection::ConnectionBuilder;
 use crate::error::{Result, Error, BuildError, BuildResult};
+use crate::http;
 
 pub struct AgentBuilder {
     filter_url: Option<url::Url>,
@@ -58,7 +59,7 @@ impl AgentBuilder {
         };
 
         if let Some(ref url) = self.filter_url {
-            log::info!(target: "builder", "Try downloading rule list from '{}'", url);
+            log::info!(target: "builder", "Try downloading rule list from '{url}'");
             let https = native_tls::TlsConnector::new()?;
 
             let client = ureq::AgentBuilder::new()
@@ -68,9 +69,9 @@ impl AgentBuilder {
                 .build();
             let resp = client.get(url.as_str()).call()?;
             let text = resp.into_string()?;
-            let kbs = text.len() as f32 / 1000f32;
+            let len = text.len() as f32 / 1000f32;
 
-            log::info!(target: "builder", "Successfully downloaded data ({}/kB transmitted)", kbs);
+            log::info!(target: "builder", "Successfully downloaded data ({len}/kB transmitted)");
             ruleset = Some(self.build_rules(text)?);
         }
 
@@ -115,25 +116,17 @@ impl Agent {
     where
         S: Read + Write + Send + Sync + Unpin + 'static
     {
-        let (request, payload) = self.read(&mut conn)?;
+        let request = self.read(&mut conn)?;
+        let host = request.host();
 
-        let value = request.headers.get("host").unwrap();
-        let mut host = value.to_str()?.to_string();
+        log::info!("CLIENT --> {host}");
 
-        if ! host.ends_with(char::is_numeric) {
-            // append a port number when without one
-            host += ":80";
-        }
-
-        log::info!("CLIENT --> {} ({}/bit request intercepted)",
-            host, payload.len());
-
-        if self.check_request_blocked(&request.uri.to_string()) {
-            log::info!("CLIENT --> PROXY --> {}", host);
+        if self.check_request_blocked(&request.path) {
+            log::info!("CLIENT --> PROXY --> {host}");
             let mut outbound = self.io(self.builder.connect(&host))?;
 
             // forward intercepted request
-            outbound.write_all(&payload).await?;
+            outbound.write_all(request.as_bytes()).await?;
             outbound.flush().await?;
 
             log::info!("CLIENT <-> PROXY (connection established)");
@@ -173,7 +166,7 @@ impl Agent {
         Ok(())
     }
 
-    fn read<S>(&self, conn: &mut S) -> Result<(http::request::Parts, Vec<u8>)>
+    fn read<S>(&self, conn: &mut S) -> Result<http::Request>
     where
         S: Read + Write + Send + Unpin + 'static
     {
@@ -187,32 +180,30 @@ impl Agent {
         let payload = buf[..offset].to_vec();
 
         let method = match request.method {
-            Some(x) => x,
+            Some(x) => x.parse::<crate::http::Method>().unwrap(),
             None => return Err(Error::BadRequest("METHOD".to_string()))
         };
 
-        let path = match request.path {
-            Some(x) => {
-                let mut text = x.to_string();
-                if text.find("://").is_none() {
-                    // in case of an cannot-be-a-base url
-                    // find a port number, if any
-                    let port = text
-                        .rfind(":")
-                        .and_then(|x| text.get(x + 1..));
-
-                    let scheme = match port {
-                        Some("443") => "https",
-                        Some("21") => "ftp",
-                        Some("80") | _ => "http",
-                    };
-
-                    text = format!("{}://{}", scheme, text);
-                }
-                text.parse::<http::Uri>()?
-            },
+        let mut path = match request.path {
+            Some(x) => x.to_string(),
             None => return Err(Error::BadRequest("PATH".to_string()))
         };
+
+        if path.find("://").is_none() {
+            // in case of an cannot-be-a-base url
+            // find a port number, if any
+            let port = path
+                .rfind(":")
+                .and_then(|x| path.get(x + 1..));
+
+            let scheme = match port {
+                Some("443") => "https",
+                Some("21") => "ftp",
+                Some("80") | _ => "http",
+            };
+
+            path = format!("{}://{}", scheme, path);
+        }
 
         let version = match request.version {
             Some(3)  => http::Version::HTTP_3,
@@ -223,21 +214,26 @@ impl Agent {
             None => return Err(Error::BadRequest("VERSION".to_string()))
         };
 
-        let (mut parts, _) = http::Request::builder()
-            .method(method)
-            .uri(path)
-            .version(version)
-            .body(())?
-            .into_parts();
+        let mut host = headers.iter()
+            .find_map(|x: _| (x.name == "Host").then_some(x.value))
+            .map(|x| std::str::from_utf8(x))
+            .ok_or(Error::BadRequest("Host".to_string()))??
+            .to_string();
 
-        for (k, v) in headers.map(|x: _| (x.name, x.value)) {
-            if k.is_empty() { break }
-            let key = k.parse::<http::HeaderName>()?;
-            let value = std::str::from_utf8(v)?.parse::<http::HeaderValue>()?;
-            parts.headers.insert(key, value);
+        if host.find(":").is_none() {
+            // append a port number when without one
+            host += ":80";
         }
 
-        Ok((parts, payload))
+        let request = crate::http::Request {
+            method,
+            path,
+            version,
+            host,
+            payload: payload.into(),
+        };
+
+        Ok(request)
     }
 
     fn check_request_blocked(&self, url: &str) -> bool {

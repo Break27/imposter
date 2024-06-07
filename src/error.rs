@@ -30,11 +30,6 @@ impl_error! {
         BadRequest("Missing part '{}'"),
         Io(std::io::Error),
         Parse(httparse::Error),
-        Http(http::Error),
-        Uri(http::uri::InvalidUri),
-        HeaderName(http::header::InvalidHeaderName),
-        HeaderValue(http::header::InvalidHeaderValue),
-        ToStr(http::header::ToStrError),
         Utf8(std::str::Utf8Error),
         Timeout(async_std::future::TimeoutError),
     }
