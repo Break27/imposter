@@ -21,16 +21,18 @@ impl Server {
             let agent = agent.clone();
             let (mut inbound, addr) = listener.accept().await?;
 
-            log::info!("*** Incoming connection from {}", addr);
+            log::info!("*** Incoming connection from {addr}");
 
             async_std::task::spawn(async move {
                 if let Err(e) = agent.handle(&mut inbound).await {
-                    log::error!("Agent: {}", e);
+                    log::error!("Agent: {e}");
                     let resp = http::Response::from_err(e);
                     
                     inbound.write(resp.to_string().as_bytes()).await.unwrap();
                     inbound.flush().await.unwrap();
                 }
+
+                let _ = inbound.shutdown(std::net::Shutdown::Both);
             });
         }
     }
