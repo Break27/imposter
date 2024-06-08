@@ -1,11 +1,12 @@
 use crate::error::Error;
 
+
 macro_rules! impl_http {
     (pub struct $name:ident($inner:ident) { $($variant:ident = $value:literal,)* }) => {
-        #[derive(PartialEq)]
+        #[derive(PartialEq, Eq)]
         pub struct $name($inner);
 
-        #[derive(PartialEq)]
+        #[derive(PartialEq, Eq)]
         #[allow(non_camel_case_types)]
         enum $inner{ $($variant,)* }
 
@@ -99,15 +100,13 @@ impl Response {
     pub fn from_err(err: Error) -> Self {
         use async_std::io::ErrorKind::TimedOut;
         match err {
-            Error::BadRequest(x) => 
-                Self::make(400, x),
+            Error::BadRequest(_) => 
+                Self::make(400, "Bad Request"),
             Error::Io(e) if e.kind() == TimedOut =>
                 Self::make(408, "Timeout"),
             Error::Io(_) =>
                 Self::make(503, "Unavailable"),
-            Error::Parse(_) =>
-                Self::make(500, "Internal Server Error"),
-            Error::Utf8(_) =>
+            Error::Parse(_) | Error::Utf8(_) =>
                 Self::make(500, "Internal Server Error"),
         }
     }

@@ -1,18 +1,11 @@
-use std::sync::Arc;
-
-use async_std::io::WriteExt;
-
-use crate::http;
-
-
 pub struct Server {
     addrs: std::net::SocketAddr,
 }
 
 impl Server {
-    pub async fn run(self, agent: crate::agent::Agent) -> Result<(), std::io::Error> {
+    pub async fn run(self, agent: crate::agent::Agent) -> std::io::Result<()> {
         let listener = async_std::net::TcpListener::bind(self.addrs).await?;
-        let agent = Arc::new(agent);
+        let agent = std::sync::Arc::new(agent);
 
         log::info!("IMPOSTER/0.1 HTTP SERVER");
         log::info!("Server listening at {}", self.addrs);
@@ -26,7 +19,9 @@ impl Server {
             async_std::task::spawn(async move {
                 if let Err(e) = agent.handle(&mut inbound).await {
                     log::error!("Agent: {e}");
-                    let resp = http::Response::from_err(e);
+
+                    let resp = crate::http::Response::from_err(e);
+                    use async_std::io::WriteExt;
                     
                     inbound.write(resp.to_string().as_bytes()).await.unwrap();
                     inbound.flush().await.unwrap();

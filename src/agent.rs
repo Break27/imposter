@@ -122,7 +122,7 @@ impl Agent {
         log::info!("CLIENT --> {host}");
 
         if self.check_request_blocked(&request.path) {
-            log::info!("CLIENT --> PROXY --> {host}");
+            log::info!("CLIENT --> PROXY --> TARGET");
             let mut outbound = self.io(self.builder.connect(host))?;
 
             // forward intercepted request
@@ -130,7 +130,9 @@ impl Agent {
             outbound.flush().await?;
 
             log::info!("CLIENT <-> PROXY (connection established)");
-            self.tunnel(conn, outbound).await?;
+            self.tunnel(conn, &mut outbound).await?;
+
+            outbound.shutdown(std::net::Shutdown::Both)?;
             return Ok(());
         }
 
@@ -150,11 +152,13 @@ impl Agent {
             log::debug!("CLIENT --> (intercepted) --> TARGET");
         }
 
-        self.tunnel(conn, target).await?;
+        self.tunnel(conn, &mut target).await?;
+        target.shutdown(std::net::Shutdown::Both)?;
+
         return Ok(());
     }
 
-    async fn tunnel<A, B>(&self, inbound: &mut A, mut outbound: B) -> Result<()>
+    async fn tunnel<A, B>(&self, inbound: &mut A, outbound: &mut B) -> Result<()>
     where
         A: Read + Write + Send + Sync + Unpin + 'static,
         B: Read + Write + Send + Sync + Unpin + 'static,

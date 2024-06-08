@@ -10,7 +10,7 @@ pub enum ConnectionBuilder {
 }
 
 impl ConnectionBuilder {
-    pub async fn connect(&self, target: &str) -> Result<Connection, std::io::Error> {
+    pub async fn connect(&self, target: &str) -> std::io::Result<Connection> {
         let conn = match self {
             Self::Http(addr) => {
                 Connection::new(TcpStream::connect(addr)?)
@@ -36,8 +36,12 @@ impl Connection {
         Self { inner: Async::new(conn).unwrap() }
     }
 
-    pub fn into_inner(self) -> Result<TcpStream, std::io::Error> {
+    pub fn into_inner(self) -> std::io::Result<TcpStream> {
         self.inner.into_inner()
+    }
+
+    pub fn shutdown(self, how: std::net::Shutdown) -> std::io::Result<()> {
+        self.into_inner()?.shutdown(how)
     }
 }
 
