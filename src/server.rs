@@ -69,9 +69,9 @@ impl ServerBuilder {
         }
 
         let engine = Engine::new(ruleset);
-        let agent = Agent::new(builder, config, engine).into();
+        let agent = Agent::new(builder, config, engine);
 
-        Ok(Server { agent })
+        Ok(Server { agent: agent.into() })
     }
 
     fn build_rules(&self, mut text: String) -> BuildResult<adblock::Engine> {
@@ -117,9 +117,13 @@ impl Server {
         let listener = TcpListener::bind(addrs).await?;
         loop {
             let (inbound, addr) = listener.accept().await?;
+            let agent = self.agent.clone();
 
             log::info!("*** Incoming connection from {addr}");
-            self.agent.spawn(inbound);
+
+            async_std::task::spawn(async move {
+                agent.handle(inbound).await;
+            });
         }
     }
 }
