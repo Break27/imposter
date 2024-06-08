@@ -1,164 +1,106 @@
-use async_std::io::{Read, Write, ReadExt, WriteExt};
+use async_std::io::{Read, ReadExt, Write, WriteExt};
 use async_std::net::TcpStream;
 
-use crate::connection::ConnectionBuilder;
-use crate::error::{Result, Error, BuildError, BuildResult};
+use crate::connection::ConnectionBuilder as Builder;
+use crate::engine::Engine;
+use crate::error::{Error, Result};
 use crate::http;
 
-pub struct AgentBuilder {
-    filter_url: Option<url::Url>,
-    buf_size: Option<usize>,
-    timeout: Option<u64>,
-    decode: bool
-}
-
-impl AgentBuilder {
-    pub fn new() -> Self {
-        Self {
-            filter_url: None,
-            buf_size: None,
-            timeout: None,
-            decode: true
-        }
-    }
-
-    pub fn filter(mut self, url: url::Url) -> Self {
-        let _ = self.filter_url.insert(url);
-        self
-    }
-
-    pub fn timeout(mut self, timeout: u64) -> Self {
-        let _ = self.timeout.insert(timeout);
-        self
-    }
-
-    pub fn buffer(mut self, size: usize) -> Self {
-        let _ = self.buf_size.insert(size);
-        self
-    }
-
-    pub fn decode(mut self, decode: bool) -> Self {
-        self.decode = decode;
-        self
-    }
-
-    pub fn build(self, remote: url::Url) -> BuildResult<Agent> {
-        use ConnectionBuilder as CB;
-        let builder = match remote.scheme() {
-            "http"  | ""       => CB::Http(remote.authority().to_string()),
-            "socks" | "socks5" => CB::Socks5(remote.authority().to_string()),
-            other => return Err(BuildError::Unsupported(other.to_string()))
-        };
-
-        let mut ruleset = None;
-        let time = self.timeout.unwrap_or(u64::MAX);
-
-        let config = AgentConfig {
-            buf_size: self.buf_size.unwrap_or(1024),
-            timeout: std::time::Duration::from_secs(time)
-        };
-
-        if let Some(ref url) = self.filter_url {
-            log::info!(target: "builder", "Try downloading rule list from '{url}'");
-            let https = native_tls::TlsConnector::new()?;
-
-            let client = ureq::AgentBuilder::new()
-                .proxy(ureq::Proxy::new(remote)?)
-                .tls_connector(https.into())
-                .timeout(config.timeout)
-                .build();
-            let resp = client.get(url.as_str()).call()?;
-            let text = resp.into_string()?;
-            let len = text.len() as f32 / 1000f32;
-
-            log::info!(target: "builder", "Successfully downloaded data ({len}/kB transmitted)");
-            ruleset = Some(self.build_rules(text)?);
-        }
-
-        Ok(Agent { builder, ruleset, config })
-    }
-
-    fn build_rules(&self, mut text: String) -> BuildResult<adblock::Engine> {
-        if self.decode {
-            log::info!(target: "builder", "Try decoding raw textual data (base64 encoded)");
-            use base64::{Engine, engine::general_purpose::STANDARD};
-            let line = text.split_whitespace().collect::<String>();
-            let decoded = STANDARD.decode(line)?;
-
-            text = String::from_utf8(decoded)?;
-        }
-
-        let mut filters = adblock::FilterSet::new(false);
-        let opts = adblock::lists::ParseOptions::default();
-        filters.add_filter_list(&text, opts);
-
-        log::info!(target: "builder", "Rule data parsed successfully");
-        Ok(adblock::Engine::from_filter_set(filters, true))
-    }
-}
-
 pub struct AgentConfig {
-    pub buf_size: usize,
+    pub bufsize: usize,
     pub timeout: std::time::Duration,
 }
 
 pub struct Agent {
-    ruleset: Option<adblock::Engine>,
-    builder: ConnectionBuilder,
+    builder: Builder,
     config: AgentConfig,
+    engine: Engine
 }
 
 unsafe impl Send for Agent {}
 unsafe impl Sync for Agent {}
 
 impl Agent {
-    pub async fn handle<S>(&self, conn: &mut S) -> Result<()>
+    pub fn new(builder: Builder, config: AgentConfig, engine: Engine) -> Self {
+        Self { builder, config, engine }
+    }
+
+    pub fn spawn(self: &std::sync::Arc<Self>, mut conn: TcpStream) {
+        let req = match self.read(&mut conn) {
+            Ok(x) => x,
+            Err(e) => return log::error!("Read Error: {e}")
+        };
+
+        let mat = self.engine.check_request_blocked(&req.path);
+        let agent = self.clone();
+
+        log::info!("CLIENT --> {} ({})",
+            req.host, mat.then_some("tunnel").unwrap_or("direct"));
+
+        async_std::task::spawn(async move {
+            let res = if mat {
+                agent.remote(req, &mut conn).await
+            } else {
+                agent.direct(req, &mut conn).await
+            };
+
+            if let Err(e) = res {
+                log::error!("Agent: {e}");
+                let resp = http::Response::from_err(e);
+
+                conn.write(resp.to_string().as_bytes()).await.unwrap();
+                conn.flush().await.unwrap();
+            }
+
+            let _ = conn.shutdown(std::net::Shutdown::Both);
+        });
+    }
+
+    async fn remote<S>(&self, req: http::Request, inbound: &mut S) -> Result<()>
     where
         S: Read + Write + Send + Sync + Unpin + 'static
     {
-        let request = self.read(conn)?;
-        let host = request.host();
+        let mut outbound = self.io(self.builder.connect(&req.host))?;
+        log::info!("CLIENT --> PROXY --> TARGET");
 
-        log::info!("CLIENT --> {host}");
+        // forward intercepted request
+        outbound.write_all(req.as_bytes()).await?;
+        outbound.flush().await?;
 
-        if self.check_request_blocked(&request.path) {
-            log::info!("CLIENT --> PROXY --> TARGET");
-            let mut outbound = self.io(self.builder.connect(host))?;
+        log::info!("CLIENT <=> PROXY (connection established)");
+        self.tunnel(inbound, &mut outbound).await;
 
-            // forward intercepted request
-            outbound.write_all(request.as_bytes()).await?;
-            outbound.flush().await?;
+        let _ = outbound.shutdown(std::net::Shutdown::Both);
+        return Ok(());
+    }
 
-            log::info!("CLIENT <-> PROXY (connection established)");
-            self.tunnel(conn, &mut outbound).await?;
+    async fn direct<S>(&self, req: http::Request, inbound: &mut S) -> Result<()>
+    where
+        S: Read + Write + Send + Sync + Unpin + 'static
+    {
+        let mut outbound = self.io(TcpStream::connect(&req.host))?;
+        log::info!("CLIENT <=> TARGET (direct)");
 
-            outbound.shutdown(std::net::Shutdown::Both)?;
-            return Ok(());
-        }
-
-        let mut target = self.io(TcpStream::connect(host))?;
-        log::info!("CLIENT <-> TARGET (direct)");
-
-        if let http::Method::CONNECT = request.method {
+        if let http::Method::CONNECT = req.method {
             let resp = http::Response::default();
-            // send response to client with code 200 and an EMPTY body
-            conn.write_all(resp.to_string().as_bytes()).await?;
-            conn.flush().await?;
+            // respond to client with code 200 and an EMPTY body
+            inbound.write_all(resp.to_string().as_bytes()).await?;
+            inbound.flush().await?;
             log::debug!("Received CONNECT (200 OK)");
         } else {
             // forward intercepted request
-            target.write_all(request.as_bytes()).await?;
-            target.flush().await?;
+            outbound.write_all(req.as_bytes()).await?;
+            outbound.flush().await?;
             log::debug!("CLIENT --> (intercepted) --> TARGET");
         }
 
-        self.tunnel(conn, &mut target).await?;
-        target.shutdown(std::net::Shutdown::Both)?;
+        self.tunnel(inbound, &mut outbound).await;
+        let _ = outbound.shutdown(std::net::Shutdown::Both);
 
         return Ok(());
     }
 
-    async fn tunnel<A, B>(&self, inbound: &mut A, outbound: &mut B) -> Result<()>
+    async fn tunnel<A, B>(&self, inbound: &mut A, outbound: &mut B)
     where
         A: Read + Write + Send + Sync + Unpin + 'static,
         B: Read + Write + Send + Sync + Unpin + 'static,
@@ -169,27 +111,22 @@ impl Agent {
         if let Err(e) = copy(
             &mut outbound.compat_mut(), &mut inbound.compat_mut()).await
         {
-            log::warn!("{}", e);
+            log::warn!("{e}");
         }
-
-        Ok(())
     }
 
-    fn read<S>(&self, conn: &mut S) -> Result<http::Request>
-    where
-        S: Read + Write + Send + Unpin + 'static
-    {
+    fn read(&self, conn: &mut TcpStream) -> Result<http::Request> {
         let mut headers = [httparse::EMPTY_HEADER; 64];
         let mut request = httparse::Request::new(&mut headers);
 
-        let mut buf = vec![0; self.config.buf_size];
+        let mut buf = vec![0; self.config.bufsize];
         self.io(conn.read(&mut buf))?;
 
         let offset = request.parse(&buf)?.unwrap();
         let payload = buf[..offset].to_vec();
 
         let method = match request.method {
-            Some(x) => x.parse::<crate::http::Method>().unwrap(),
+            Some(x) => x.parse::<http::Method>().unwrap(),
             None => return Err(Error::BadRequest("METHOD".to_string()))
         };
 
@@ -234,7 +171,7 @@ impl Agent {
             host += ":80";
         }
 
-        let request = crate::http::Request {
+        let request = http::Request {
             method,
             path,
             version,
@@ -243,22 +180,6 @@ impl Agent {
         };
 
         Ok(request)
-    }
-
-    fn check_request_blocked(&self, url: &str) -> bool {
-        let attempt: _ = adblock::request::Request::new(
-            url, url, "fetch"
-        );
-
-        let req = match attempt {
-            Ok(x) => x,
-            Err(_) => return true
-        };
-
-        match &self.ruleset {
-            Some(x) => x.check_network_request(&req).matched,
-            None => true // always use tunnel when without rules
-        }
     }
 
     fn io<T, F>(&self, f: F) -> Result<T>

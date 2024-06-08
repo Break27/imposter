@@ -1290,6 +1290,7 @@ dependencies = [
  "log",
  "native-tls",
  "once_cell",
+ "socks",
  "url",
 ]
 

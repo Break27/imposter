@@ -70,10 +70,6 @@ impl Request {
     pub fn as_bytes(&self) -> &[u8] {
         &self.payload
     }
-
-    pub fn host(&self) -> &str {
-        &self.host
-    }
 }
 
 pub struct Response {

@@ -31,8 +31,7 @@ unsafe impl Send for Connection {}
 unsafe impl Sync for Connection {}
 
 impl Connection {
-    pub fn new(conn: TcpStream) -> Self 
-    {
+    pub fn new(conn: TcpStream) -> Self {
         Self { inner: Async::new(conn).unwrap() }
     }
 
